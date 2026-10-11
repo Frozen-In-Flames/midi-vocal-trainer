@@ -18,10 +18,13 @@ Download,
 Trash2,
 FolderOpen,
 ListMusic,
+BookOpenText,
 } from "lucide-react";
 import { EngineConfig, KaraokeSong, PitchAnalysisFrame } from "./types";
 import { MidiAutoTuneEngine, freqToMidi, midiToFreq } from "./audioEngine";
 import { parseMidiFile, songTitleFromFile, type ParsedMidi } from "./midi";
+import { parseMusicXmlFile, songTitleFromSheetFile, type ParsedSheetMusic } from "./sheetMusic";
+import { parseAbcText, abcTitleFromText } from "./abc";
 import { transcribeBuffer, decodeAudioToMono } from "./audioToMidi";
 import {
 loadUserSongs,
@@ -163,9 +166,14 @@ const [editing, setEditing] = useState<{ song: KaraokeSong; audio: { data: Float
 const [importing, setImporting] = useState<string | null>(null);
 const [importError, setImportError] = useState<string | null>(null);
 const [trackPicker, setTrackPicker] = useState<{ parsed: ParsedMidi; title: string } | null>(null);
+const [partPicker, setPartPicker] = useState<{ parsed: ParsedSheetMusic; title: string } | null>(null);
+const [sheetOpen, setSheetOpen] = useState(false);
+const [sheetTab, setSheetTab] = useState<"xml" | "abc">("xml");
+const [abcText, setAbcText] = useState("");
 const midiInputRef = useRef<HTMLInputElement>(null);
 const audioInputRef = useRef<HTMLInputElement>(null);
 const jsonInputRef = useRef<HTMLInputElement>(null);
+const xmlInputRef = useRef<HTMLInputElement>(null);
 const karaokeStartTimeRef = useRef<number>(0);
 const karaokePauseOffsetRef = useRef<number>(0);
 const latestAnalysisRef = useRef<PitchAnalysisFrame>({
@@ -326,10 +334,11 @@ notes: KaraokeSong["notes"],
 duration: number,
 title: string,
 audio: { data: Float32Array; sampleRate: number } | null,
+bpm = 120,
 ) => {
 const totalDuration = notes.length > 0 ? Math.max(...notes.map((x) => x.start + x.duration)) : duration;
 setEditing({
-song: { id: makeSongId(), title, genre: "My Songs", bpm: 120, totalDuration, notes },
+song: { id: makeSongId(), title, genre: "My Songs", bpm, totalDuration, notes },
 audio,
 });
 };
@@ -386,8 +395,64 @@ setImporting(null);
 }
 };
 
-const handleJsonFile = async (file: File) => {
+const handleMusicXmlFile = async (file: File) => {
 setImportError(null);
+if (/\.mxl$/i.test(file.name)) {
+setImportError("Zipped .mxl files aren't supported. Export uncompressed MusicXML (.musicxml) from your notation app instead.");
+return;
+}
+setImporting(`Reading ${file.name}...`);
+try {
+const parsed = await parseMusicXmlFile(file);
+const title = songTitleFromSheetFile(file.name) || parsed.title;
+const usable = parsed.parts.filter((p) => p.noteCount > 0);
+if (usable.length === 0) throw new Error("No notes found in that sheet music.");
+if (usable.length > 1) {
+setPartPicker({ parsed, title });
+} else {
+const notes = parsed.getNotes(usable[0].id);
+openEditorForNotes(notes, parsed.duration, title, null, parsed.bpm);
+}
+} catch (e) {
+setImportError(e instanceof Error ? e.message : "Could not read that sheet music file.");
+} finally {
+setImporting(null);
+}
+};
+
+const pickSheetPart = (partId: string) => {
+if (!partPicker) return;
+const notes = partPicker.parsed.getNotes(partId);
+const title = partPicker.title;
+const bpm = partPicker.parsed.bpm;
+const duration = partPicker.parsed.duration;
+setPartPicker(null);
+setSheetOpen(false);
+if (notes.length === 0) {
+setImportError("That part has no usable notes.");
+return;
+}
+openEditorForNotes(notes, duration, title, null, bpm);
+};
+
+const handleAbcSubmit = () => {
+setImportError(null);
+if (!abcText.trim()) {
+setImportError("Paste some ABC notation first.");
+return;
+}
+try {
+const parsed = parseAbcText(abcText);
+if (parsed.notes.length === 0) throw new Error("No notes found in that ABC text. Check the K: key line and the note letters.");
+const title = abcTitleFromText(abcText);
+setSheetOpen(false);
+openEditorForNotes(parsed.notes, parsed.duration, title, null, parsed.bpm);
+} catch (e) {
+setImportError(e instanceof Error ? e.message : "Could not parse that ABC notation.");
+}
+};
+
+const handleJsonFile = async (file: File) => {setImportError(null);
 try {
 const song = await importSongFile(file);
 persistUserSongs([...userSongs, song]);
@@ -685,13 +750,16 @@ MATCH {matchPct}%
 <button onClick={() => audioInputRef.current?.click()} className="px-3 py-1.5 rounded-lg bg-violet-700 hover:bg-violet-600 text-white text-xs font-bold flex items-center gap-1.5">
 <AudioLines className="w-3.5 h-3.5" /> Upload vocal audio
 </button>
+<button onClick={() => { setImportError(null); setSheetTab("xml"); setSheetOpen(true); }} className="px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white text-xs font-bold flex items-center gap-1.5">
+<BookOpenText className="w-3.5 h-3.5" /> Sheet music
+</button>
 <button onClick={() => jsonInputRef.current?.click()} className="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-white text-xs font-bold flex items-center gap-1.5">
 <FolderOpen className="w-3.5 h-3.5" /> Import song
 </button>
 </div>
 </div>
 <p className="text-[11px] text-slate-500">
-Upload a MIDI of a song you wrote, or a WAV / M4A / MP3 of you singing it. The app pulls the melody into notes and drafts the lyrics, then you fix anything by hand in the editor and save it to your library. Audio works best on solo vocal recordings, not mixed songs.
+Upload a MIDI of a song you wrote, a WAV / M4A / MP3 of you singing it, or your sheet music as a MusicXML file. You can also paste ABC notation straight in. No MIDI and no recording? Sheet music alone is enough: the app turns it into a pitch guide you practice against with the live MATCH % meter and the end-of-song report card. Audio works best on solo vocal recordings, not mixed songs.
 </p>
 {importing && <div className="text-xs text-cyan-300 font-semibold">{importing}</div>}
 {importError && <div className="text-xs text-red-400 font-semibold">{importError}</div>}
@@ -727,6 +795,7 @@ className="text-sm font-bold text-white hover:text-cyan-300 text-left flex-1 tru
 <input ref={midiInputRef} type="file" accept=".mid,.midi" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) void handleMidiFile(f); e.target.value = ""; }} />
 <input ref={audioInputRef} type="file" accept=".wav,.m4a,.mp3,audio/wav,audio/mp4,audio/mpeg" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) void handleAudioFile(f); e.target.value = ""; }} />
 <input ref={jsonInputRef} type="file" accept=".json" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) void handleJsonFile(f); e.target.value = ""; }} />
+<input ref={xmlInputRef} type="file" accept=".musicxml,.xml,.mxl" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) void handleMusicXmlFile(f); e.target.value = ""; }} />
 </div>
 {trackPicker && (
 <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-3" onClick={() => setTrackPicker(null)}>
@@ -742,6 +811,63 @@ className="text-sm font-bold text-white hover:text-cyan-300 text-left flex-1 tru
 ))}
 </div>
 <button onClick={() => setTrackPicker(null)} className="mt-3 w-full py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-sm font-bold text-slate-200">Cancel</button>
+</div>
+</div>
+)}
+{sheetOpen && (
+<div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-3" onClick={() => setSheetOpen(false)}>
+<div className="w-full max-w-lg bg-[#141821] border border-slate-700 rounded-2xl p-5" onClick={(e) => e.stopPropagation()}>
+<h3 className="text-base font-black text-white mb-1">Add from sheet music</h3>
+<p className="text-xs text-slate-400 mb-3">No MIDI and no recording needed. Your sheet music becomes the pitch guide you practice against.</p>
+<div className="flex gap-2 mb-4">
+<button onClick={() => setSheetTab("xml")} className={`px-3 py-1.5 rounded-lg text-xs font-bold ${sheetTab === "xml" ? "bg-emerald-600 text-white" : "bg-slate-900 text-slate-400 border border-slate-800"}`}>
+MusicXML file
+</button>
+<button onClick={() => setSheetTab("abc")} className={`px-3 py-1.5 rounded-lg text-xs font-bold ${sheetTab === "abc" ? "bg-emerald-600 text-white" : "bg-slate-900 text-slate-400 border border-slate-800"}`}>
+Paste ABC notation
+</button>
+</div>
+{sheetTab === "xml" ? (
+<div className="space-y-3">
+<button onClick={() => xmlInputRef.current?.click()} className="w-full py-2.5 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white text-sm font-bold flex items-center justify-center gap-2">
+<BookOpenText className="w-4 h-4" /> Choose .musicxml file
+</button>
+<p className="text-[11px] text-slate-500">Uncompressed MusicXML only (.musicxml / .xml). Zipped .mxl is not supported. Multi-part scores ask which part carries the melody, lyrics come along when the file has them, and tied notes are merged.</p>
+</div>
+) : (
+<div className="space-y-3">
+<textarea
+value={abcText}
+onChange={(e) => setAbcText(e.target.value)}
+rows={10}
+spellCheck={false}
+placeholder={"X:1\nT:My Song\nM:4/4\nL:1/8\nQ:1/4=120\nK:G\nG2 AB c2 d2 | e2 d2 B2 G2 |\nw: Sing your song one note at a time"}
+className="w-full bg-slate-950 border border-slate-700 rounded-lg p-3 text-xs font-mono text-slate-200 focus:outline-none focus:border-emerald-600"
+/>
+<button onClick={handleAbcSubmit} className="w-full py-2.5 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white text-sm font-bold">
+Parse ABC into a song
+</button>
+<p className="text-[11px] text-slate-500">Common ABC subset: key and meter headers, note letters with octaves and accidentals, rests, chords, and w: lyric lines. First voice only.</p>
+</div>
+)}
+<button onClick={() => setSheetOpen(false)} className="mt-3 w-full py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-sm font-bold text-slate-200">Cancel</button>
+</div>
+</div>
+)}
+{partPicker && (
+<div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-3" onClick={() => setPartPicker(null)}>
+<div className="w-full max-w-md bg-[#141821] border border-slate-700 rounded-2xl p-5" onClick={(e) => e.stopPropagation()}>
+<h3 className="text-base font-black text-white mb-1">Which part is the melody?</h3>
+<p className="text-xs text-slate-400 mb-3">&ldquo;{partPicker.title}&rdquo; has {partPicker.parsed.parts.filter((p) => p.noteCount > 0).length} parts with notes. Pick the one carrying the vocal line.</p>
+<div className="space-y-2 max-h-64 overflow-y-auto">
+{partPicker.parsed.parts.filter((p) => p.noteCount > 0).map((p) => (
+<button key={p.id} onClick={() => pickSheetPart(p.id)} className={`w-full text-left px-3 py-2 rounded-lg border text-sm ${p.id === partPicker.parsed.suggestedPart ? "border-emerald-600 bg-emerald-950/40" : "border-slate-800 bg-[#171c26] hover:border-slate-600"}`}>
+<div className="font-bold text-white">{p.name}{p.id === partPicker.parsed.suggestedPart && <span className="ml-2 text-[10px] text-emerald-300 font-bold">SUGGESTED</span>}</div>
+<div className="text-[11px] text-slate-400">{p.noteCount} notes</div>
+</button>
+))}
+</div>
+<button onClick={() => setPartPicker(null)} className="mt-3 w-full py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-sm font-bold text-slate-200">Cancel</button>
 </div>
 </div>
 )}
